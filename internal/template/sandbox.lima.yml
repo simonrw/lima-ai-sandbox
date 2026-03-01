@@ -1,0 +1,54 @@
+minimumLimaVersion: "2.0.0"
+
+base:
+  - template:_images/ubuntu
+  - template:_default/mounts
+
+{{- if .ProjectDir }}
+mounts:
+  - location: "{{ .ProjectDir }}"
+    mountPoint: "/workspace"
+    writable: true
+{{- end }}
+
+{{- if .APIKey }}
+env:
+  ANTHROPIC_API_KEY: "{{ .APIKey }}"
+{{- end }}
+
+{{- if or .CPUs .Memory .Disk }}
+{{- if .CPUs }}
+cpus: {{ .CPUs }}
+{{- end }}
+{{- if .Memory }}
+memory: "{{ .Memory }}"
+{{- end }}
+{{- if .Disk }}
+disk: "{{ .Disk }}"
+{{- end }}
+{{- end }}
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+      if command -v claude >/dev/null 2>&1; then exit 0; fi
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+      curl -fsSL https://claude.ai/install.sh | bash
+      echo 'export PATH=${PATH}:${HOME}/.local/bin' >> ~/.bashrc
+
+probes:
+  - mode: readiness
+    description: "claude to be installed"
+    script: |
+      #!/bin/bash
+      if ! timeout 120s bash -c "until command -v claude; do sleep 3; done"; then
+        echo >&2 "claude is not installed yet"
+        exit 1
+      fi
+    hint: |
+      claude was not installed in the guest. Check /var/log/cloud-init-output.log in the guest.
