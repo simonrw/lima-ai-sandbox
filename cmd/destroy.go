@@ -7,6 +7,7 @@ import (
 
 	"github.com/simonrw/lima-ai-sandbox/internal/lima"
 	"github.com/simonrw/lima-ai-sandbox/internal/naming"
+	"github.com/simonrw/lima-ai-sandbox/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
@@ -57,10 +58,20 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 			}
 		}
 
+		// Look up worktree metadata before deleting
+		meta, _ := worktree.LookupFromCwd(name)
+
 		if err := lima.Delete(ctx, name, true); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: delete %s: %v\n", name, err)
 			lastErr = err
 			continue
+		}
+
+		// Clean up worktree if one was associated
+		if meta != nil {
+			if err := worktree.Remove(ctx, meta.RepoRoot, name); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: worktree cleanup %s: %v\n", name, err)
+			}
 		}
 
 		fmt.Fprintf(os.Stderr, "Destroyed %s.\n", name)

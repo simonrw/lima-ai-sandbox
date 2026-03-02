@@ -9,6 +9,7 @@ import (
 
 	"github.com/simonrw/lima-ai-sandbox/internal/lima"
 	"github.com/simonrw/lima-ai-sandbox/internal/naming"
+	"github.com/simonrw/lima-ai-sandbox/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
@@ -61,10 +62,14 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSTATUS\tARCH\tCPUS\tMEMORY\tDISK")
+	fmt.Fprintln(w, "NAME\tSTATUS\tBRANCH\tARCH\tCPUS\tMEMORY\tDISK")
 	for _, s := range sandboxes {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n",
-			s.Name, s.Status, s.Arch, s.CPUs,
+		branch := "-"
+		if meta, _ := worktree.LookupFromCwd(s.Name); meta != nil {
+			branch = meta.Branch
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			s.Name, s.Status, branch, s.Arch, s.CPUs,
 			formatBytes(s.Memory), formatBytes(s.Disk))
 	}
 	return w.Flush()

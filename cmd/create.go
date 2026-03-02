@@ -7,9 +7,11 @@ import (
 	"os/signal"
 	"path/filepath"
 
+	"github.com/simonrw/lima-ai-sandbox/internal/config"
 	"github.com/simonrw/lima-ai-sandbox/internal/lima"
 	"github.com/simonrw/lima-ai-sandbox/internal/naming"
 	"github.com/simonrw/lima-ai-sandbox/internal/template"
+	"github.com/simonrw/lima-ai-sandbox/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
@@ -28,6 +30,7 @@ var (
 	flagMemory     string
 	flagDisk       string
 	flagNoAttach   bool
+	flagBranch     string
 )
 
 func init() {
@@ -38,6 +41,7 @@ func init() {
 	createCmd.Flags().StringVar(&flagMemory, "memory", "", "Memory size (e.g. 4GiB)")
 	createCmd.Flags().StringVar(&flagDisk, "disk", "", "Disk size (e.g. 50GiB)")
 	createCmd.Flags().BoolVar(&flagNoAttach, "no-attach", false, "Don't attach after creation")
+	createCmd.Flags().StringVar(&flagBranch, "branch", "", "Create a git worktree for this branch and mount it instead of the project dir")
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
@@ -77,9 +81,20 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// If --branch is set, create a git worktree and use it as the mount dir
+	mountDir := projectDir
+	if flagBranch != "" {
+		fmt.Fprintf(os.Stderr, "Creating worktree for branch %s...\n", flagBranch)
+		wtPath, err := worktree.Create(ctx, projectDir, name, flagBranch)
+		if err != nil {
+			return fmt.Errorf("creating worktree: %w", err)
+		}
+		mountDir = wtPath
+	}
+
 	// Render template
 	tmplFile, err := template.Render(template.Params{
-		ProjectDir: projectDir,
+		ProjectDir: mountDir,
 		APIKey:     apiKey,
 		CPUs:       flagCPUs,
 		Memory:     flagMemory,
@@ -97,6 +112,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		Name:         name,
 		TemplateFile: tmplFile,
 	}); err != nil {
+		if flagBranch != "" {
+			worktree.Remove(context.Background(), projectDir, name)
+		}
 		return err
 	}
 
@@ -104,6 +122,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	cleanup := func() {
 		fmt.Fprintf(os.Stderr, "\nCleaning up %s...\n", name)
 		lima.Delete(context.Background(), name, true)
+		if flagBranch != "" {
+			worktree.Remove(context.Background(), projectDir, name)
+		}
 	}
 
 	// Start instance
@@ -111,6 +132,27 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if err := lima.Start(ctx, name); err != nil {
 		cleanup()
 		return err
+	}
+
+	// Run post-checkout steps if --branch was used
+	if flagBranch != "" {
+		cfg, err := config.Load(projectDir)
+		if err != nil {
+			cleanup()
+			return fmt.Errorf("loading .sandbox.yml: %w", err)
+		}
+		for _, step := range cfg.PostCheckout {
+			fmt.Fprintf(os.Stderr, "Running post-checkout: %s\n", step)
+			exitCode, err := lima.ShellRun(ctx, name, "/workspace", "bash", "-c", step)
+			if err != nil {
+				cleanup()
+				return fmt.Errorf("post-checkout step %q: %w", step, err)
+			}
+			if exitCode != 0 {
+				cleanup()
+				return fmt.Errorf("post-checkout step %q exited with code %d", step, exitCode)
+			}
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "Sandbox %s is ready.\n", name)
