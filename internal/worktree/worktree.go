@@ -10,20 +10,22 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
-const worktreeDir = ".sandbox-worktrees"
+const metadataDir = ".sandbox-worktrees"
 
-// Metadata holds information about a sandbox's worktree.
+// Metadata holds information about a sandbox's branch and git server.
 type Metadata struct {
-	SandboxName  string `json:"sandbox_name"`
-	WorktreePath string `json:"worktree_path"`
-	Branch       string `json:"branch"`
-	RepoRoot     string `json:"repo_root"`
+	SandboxName string `json:"sandbox_name"`
+	Branch      string `json:"branch"`
+	RepoRoot    string `json:"repo_root"`
+	ServerPID   int    `json:"server_pid,omitempty"`
+	ServerPort  int    `json:"server_port,omitempty"`
 }
 
-// repoRoot returns the git repo root for the given directory.
-func repoRoot(ctx context.Context, dir string) (string, error) {
+// RepoRoot returns the git repo root for the given directory.
+func RepoRoot(ctx context.Context, dir string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
 	cmd.Dir = dir
 	out, err := cmd.Output()
@@ -33,66 +35,46 @@ func repoRoot(ctx context.Context, dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// branchExists checks whether a local branch exists.
-func branchExists(ctx context.Context, dir, branch string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "refs/heads/"+branch)
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return false, nil
+// GitUserConfig reads the git user.name and user.email config from the given directory.
+func GitUserConfig(ctx context.Context, dir string) (name, email string) {
+	if cmd := exec.CommandContext(ctx, "git", "config", "user.name"); cmd != nil {
+		cmd.Dir = dir
+		if out, err := cmd.Output(); err == nil {
+			name = strings.TrimSpace(string(out))
 		}
-		return false, err
 	}
-	return true, nil
+	if cmd := exec.CommandContext(ctx, "git", "config", "user.email"); cmd != nil {
+		cmd.Dir = dir
+		if out, err := cmd.Output(); err == nil {
+			email = strings.TrimSpace(string(out))
+		}
+	}
+	return name, email
 }
 
 // metadataPath returns the path to the metadata JSON file for a sandbox.
 func metadataPath(root, sandboxName string) string {
-	return filepath.Join(root, worktreeDir, sandboxName+".json")
+	return filepath.Join(root, metadataDir, sandboxName+".json")
 }
 
-// Create creates a git worktree for the given sandbox and branch.
-// If the branch does not exist, it is created from HEAD.
-// Returns the absolute path to the worktree directory.
-func Create(ctx context.Context, repoDir, sandboxName, branch string) (string, error) {
-	root, err := repoRoot(ctx, repoDir)
+// Create saves metadata for a sandbox branch association.
+// Returns the repo root path.
+func Create(ctx context.Context, repoDir, sandboxName, branch string, serverPID, serverPort int) (string, error) {
+	root, err := RepoRoot(ctx, repoDir)
 	if err != nil {
 		return "", err
 	}
 
-	wtPath := filepath.Join(root, worktreeDir, sandboxName)
-
-	exists, err := branchExists(ctx, root, branch)
-	if err != nil {
-		return "", fmt.Errorf("checking branch: %w", err)
-	}
-
-	var args []string
-	if exists {
-		args = []string{"worktree", "add", wtPath, branch}
-	} else {
-		args = []string{"worktree", "add", "-b", branch, wtPath}
-	}
-
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = root
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git worktree add: %w", err)
-	}
-
-	// Write metadata
 	meta := Metadata{
-		SandboxName:  sandboxName,
-		WorktreePath: wtPath,
-		Branch:       branch,
-		RepoRoot:     root,
+		SandboxName: sandboxName,
+		Branch:      branch,
+		RepoRoot:    root,
+		ServerPID:   serverPID,
+		ServerPort:  serverPort,
 	}
 
-	metaDir := filepath.Join(root, worktreeDir)
-	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+	dir := filepath.Join(root, metadataDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating metadata dir: %w", err)
 	}
 
@@ -104,13 +86,13 @@ func Create(ctx context.Context, repoDir, sandboxName, branch string) (string, e
 		return "", fmt.Errorf("writing metadata: %w", err)
 	}
 
-	return wtPath, nil
+	return root, nil
 }
 
-// Remove removes the git worktree and metadata for a sandbox.
+// Remove deletes metadata for a sandbox and kills the git server process.
 // It is a no-op if no metadata exists.
 func Remove(ctx context.Context, repoDir, sandboxName string) error {
-	root, err := repoRoot(ctx, repoDir)
+	root, err := RepoRoot(ctx, repoDir)
 	if err != nil {
 		return err
 	}
@@ -123,14 +105,11 @@ func Remove(ctx context.Context, repoDir, sandboxName string) error {
 		return nil // no-op
 	}
 
-	// Try normal remove, fall back to --force
-	cmd := exec.CommandContext(ctx, "git", "worktree", "remove", meta.WorktreePath)
-	cmd.Dir = root
-	if err := cmd.Run(); err != nil {
-		cmd2 := exec.CommandContext(ctx, "git", "worktree", "remove", "--force", meta.WorktreePath)
-		cmd2.Dir = root
-		if err2 := cmd2.Run(); err2 != nil {
-			return fmt.Errorf("git worktree remove --force: %w", err2)
+	// Kill the git HTTP server if running
+	if meta.ServerPID > 0 {
+		if proc, err := os.FindProcess(meta.ServerPID); err == nil {
+			// Send SIGTERM; ignore errors (process may already be dead)
+			proc.Signal(syscall.SIGTERM)
 		}
 	}
 
@@ -139,8 +118,8 @@ func Remove(ctx context.Context, repoDir, sandboxName string) error {
 		return fmt.Errorf("removing metadata: %w", err)
 	}
 
-	// Clean up empty worktree dir
-	dir := filepath.Join(root, worktreeDir)
+	// Clean up empty metadata dir
+	dir := filepath.Join(root, metadataDir)
 	entries, err := os.ReadDir(dir)
 	if err == nil && len(entries) == 0 {
 		os.Remove(dir)
@@ -167,7 +146,7 @@ func Lookup(repoRoot, sandboxName string) (*Metadata, error) {
 }
 
 // LookupFromCwd finds metadata for a sandbox by walking up from the
-// current working directory looking for the .sandbox-worktrees directory.
+// current working directory looking for the metadata directory.
 func LookupFromCwd(sandboxName string) (*Metadata, error) {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -177,7 +156,7 @@ func LookupFromCwd(sandboxName string) (*Metadata, error) {
 }
 
 // LookupFromDir finds metadata for a sandbox by walking up from dir
-// looking for the .sandbox-worktrees directory.
+// looking for the metadata directory.
 func LookupFromDir(dir, sandboxName string) (*Metadata, error) {
 	for {
 		metaFile := metadataPath(dir, sandboxName)

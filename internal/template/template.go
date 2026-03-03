@@ -13,11 +13,15 @@ var sandboxTemplate string
 
 // Params holds the values injected into the Lima template.
 type Params struct {
-	ProjectDir string
-	APIKey     string
-	CPUs       int
-	Memory     string
-	Disk       string
+	ProjectDir   string // mount at /workspace (non-branch mode only)
+	GitURL       string // http://host.lima.internal:<port>/ (branch mode)
+	Branch       string // branch to clone
+	GitUserName  string // propagate host git user.name
+	GitUserEmail string // propagate host git user.email
+	APIKey       string
+	CPUs         int
+	Memory       string
+	Disk         string
 }
 
 // Render renders the embedded Lima template with the given params and writes

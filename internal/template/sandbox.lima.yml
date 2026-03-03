@@ -4,7 +4,7 @@ base:
   - template:_images/ubuntu
   - template:_default/mounts
 
-{{- if .ProjectDir }}
+{{- if and .ProjectDir (not .Branch) }}
 mounts:
   - location: "{{ .ProjectDir }}"
     mountPoint: "/workspace"
@@ -34,6 +34,34 @@ provision:
       #!/bin/bash
       set -euo pipefail
       if command -v claude >/dev/null 2>&1; then exit 0; fi
+{{- if .Branch }}
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+      if git clone --branch "{{ .Branch }}" "{{ .GitURL }}" /workspace; then
+        echo "Cloned existing branch {{ .Branch }}"
+      else
+        git clone "{{ .GitURL }}" /workspace
+        cd /workspace
+        git checkout -b "{{ .Branch }}"
+        echo "Created new branch {{ .Branch }}"
+      fi
+      cd /workspace
+      {{- if .GitUserName }}
+      git config user.name "{{ .GitUserName }}"
+      {{- end }}
+      {{- if .GitUserEmail }}
+      git config user.email "{{ .GitUserEmail }}"
+      {{- end }}
+      mkdir -p .git/hooks
+      cat > .git/hooks/post-commit << 'HOOK'
+      #!/bin/bash
+      branch=$(git symbolic-ref --short HEAD)
+      git push origin "$branch" 2>&1 || echo "Warning: post-commit push to host failed" >&2
+      HOOK
+      chmod +x .git/hooks/post-commit
+{{- end }}
   - mode: user
     script: |
       #!/bin/bash

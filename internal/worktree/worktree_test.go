@@ -17,7 +17,7 @@ func initRepo(t *testing.T) string {
 	for _, args := range [][]string{
 		{"init"},
 		{"config", "user.email", "test@test.com"},
-		{"config", "user.name", "Test"},
+		{"config", "user.name", "Test User"},
 		{"commit", "--allow-empty", "-m", "init"},
 	} {
 		cmd := exec.Command("git", args...)
@@ -30,58 +30,64 @@ func initRepo(t *testing.T) string {
 	return dir
 }
 
-func TestCreateNewBranch(t *testing.T) {
+func TestRepoRoot(t *testing.T) {
 	repo := initRepo(t)
 	ctx := context.Background()
 
-	wtPath, err := Create(ctx, repo, "sandbox-test1", "feature-new")
+	root, err := RepoRoot(ctx, repo)
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("RepoRoot: %v", err)
 	}
 
-	// Worktree directory should exist
-	if _, err := os.Stat(wtPath); err != nil {
-		t.Fatalf("worktree dir not found: %v", err)
-	}
-
-	// Should be inside .sandbox-worktrees
-	expected := filepath.Join(repo, worktreeDir, "sandbox-test1")
-	if wtPath != expected {
-		t.Errorf("worktree path = %q, want %q", wtPath, expected)
+	// Resolve symlinks for comparison (t.TempDir may use /tmp which is a symlink)
+	expected, _ := filepath.EvalSymlinks(repo)
+	got, _ := filepath.EvalSymlinks(root)
+	if got != expected {
+		t.Errorf("RepoRoot = %q, want %q", got, expected)
 	}
 }
 
-func TestCreateExistingBranch(t *testing.T) {
-	repo := initRepo(t)
+func TestRepoRootNotGitRepo(t *testing.T) {
+	dir := t.TempDir()
 	ctx := context.Background()
 
-	// Create a branch first
-	cmd := exec.Command("git", "branch", "existing-branch")
-	cmd.Dir = repo
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git branch: %v\n%s", err, out)
-	}
-
-	wtPath, err := Create(ctx, repo, "sandbox-test2", "existing-branch")
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	if _, err := os.Stat(wtPath); err != nil {
-		t.Fatalf("worktree dir not found: %v", err)
+	_, err := RepoRoot(ctx, dir)
+	if err == nil {
+		t.Fatal("expected error for non-git dir")
 	}
 }
 
-func TestMetadataWrittenAndReadable(t *testing.T) {
+func TestGitUserConfig(t *testing.T) {
 	repo := initRepo(t)
 	ctx := context.Background()
 
-	_, err := Create(ctx, repo, "sandbox-meta", "branch-meta")
+	name, email := GitUserConfig(ctx, repo)
+	if name != "Test User" {
+		t.Errorf("GitUserConfig name = %q, want %q", name, "Test User")
+	}
+	if email != "test@test.com" {
+		t.Errorf("GitUserConfig email = %q, want %q", email, "test@test.com")
+	}
+}
+
+func TestCreateSavesMetadata(t *testing.T) {
+	repo := initRepo(t)
+	ctx := context.Background()
+
+	root, err := Create(ctx, repo, "sandbox-meta", "feature-x", 12345, 8080)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	meta, err := Lookup(repo, "sandbox-meta")
+	// Verify returned root
+	expected, _ := filepath.EvalSymlinks(repo)
+	got, _ := filepath.EvalSymlinks(root)
+	if got != expected {
+		t.Errorf("Create returned root = %q, want %q", got, expected)
+	}
+
+	// Verify metadata file
+	meta, err := Lookup(root, "sandbox-meta")
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
@@ -91,15 +97,18 @@ func TestMetadataWrittenAndReadable(t *testing.T) {
 	if meta.SandboxName != "sandbox-meta" {
 		t.Errorf("SandboxName = %q, want %q", meta.SandboxName, "sandbox-meta")
 	}
-	if meta.Branch != "branch-meta" {
-		t.Errorf("Branch = %q, want %q", meta.Branch, "branch-meta")
+	if meta.Branch != "feature-x" {
+		t.Errorf("Branch = %q, want %q", meta.Branch, "feature-x")
 	}
-	if meta.RepoRoot != repo {
-		t.Errorf("RepoRoot = %q, want %q", meta.RepoRoot, repo)
+	if meta.ServerPID != 12345 {
+		t.Errorf("ServerPID = %d, want %d", meta.ServerPID, 12345)
+	}
+	if meta.ServerPort != 8080 {
+		t.Errorf("ServerPort = %d, want %d", meta.ServerPort, 8080)
 	}
 
-	// Also verify the JSON file is valid
-	data, err := os.ReadFile(metadataPath(repo, "sandbox-meta"))
+	// Verify JSON is valid
+	data, err := os.ReadFile(metadataPath(root, "sandbox-meta"))
 	if err != nil {
 		t.Fatalf("reading metadata file: %v", err)
 	}
@@ -107,13 +116,16 @@ func TestMetadataWrittenAndReadable(t *testing.T) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("parsing metadata JSON: %v", err)
 	}
+	if raw.ServerPID != 12345 {
+		t.Errorf("JSON ServerPID = %d, want %d", raw.ServerPID, 12345)
+	}
 }
 
-func TestRemoveCleansUp(t *testing.T) {
+func TestRemoveCleansUpMetadata(t *testing.T) {
 	repo := initRepo(t)
 	ctx := context.Background()
 
-	wtPath, err := Create(ctx, repo, "sandbox-rm", "branch-rm")
+	root, err := Create(ctx, repo, "sandbox-rm", "branch-rm", 0, 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -122,13 +134,8 @@ func TestRemoveCleansUp(t *testing.T) {
 		t.Fatalf("Remove: %v", err)
 	}
 
-	// Worktree dir should be gone
-	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
-		t.Errorf("worktree dir still exists after Remove")
-	}
-
 	// Metadata file should be gone
-	if _, err := os.Stat(metadataPath(repo, "sandbox-rm")); !os.IsNotExist(err) {
+	if _, err := os.Stat(metadataPath(root, "sandbox-rm")); !os.IsNotExist(err) {
 		t.Errorf("metadata file still exists after Remove")
 	}
 }
@@ -147,8 +154,7 @@ func TestLookupFromDir(t *testing.T) {
 	repo := initRepo(t)
 	ctx := context.Background()
 
-	_, err := Create(ctx, repo, "sandbox-walk", "branch-walk")
-	if err != nil {
+	if _, err := Create(ctx, repo, "sandbox-walk", "branch-walk", 99, 9999); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -169,6 +175,9 @@ func TestLookupFromDir(t *testing.T) {
 	if meta.Branch != "branch-walk" {
 		t.Errorf("Branch = %q, want %q", meta.Branch, "branch-walk")
 	}
+	if meta.ServerPort != 9999 {
+		t.Errorf("ServerPort = %d, want %d", meta.ServerPort, 9999)
+	}
 }
 
 func TestLookupFromDirNotFound(t *testing.T) {
@@ -187,7 +196,7 @@ func TestCreateErrorNotGitRepo(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	_, err := Create(ctx, dir, "sandbox-err", "branch-err")
+	_, err := Create(ctx, dir, "sandbox-err", "branch-err", 0, 0)
 	if err == nil {
 		t.Fatal("expected error for non-git dir")
 	}
